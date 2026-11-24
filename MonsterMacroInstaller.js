@@ -1,12 +1,12 @@
 /*
- * Monster Macro Installer v1.6
+ * Monster Macro Installer v1.7
  * Roll20 Mod API | D&D 5e by Roll20 (2014) NPC sheet
- * Commands: !setupnpc, !setupnpc --all, !setupnpc --token, !setupnpc --help
+ * Commands: !setupnpc, !setupnpc --all, !setupnpc --token, !setupnpc --macros, !setupnpc --help
  * Install in Roll20: Game Settings > Mod (API) Scripts > New Script.
  */
 var MonsterMacroInstaller = MonsterMacroInstaller || (function () {
     'use strict';
-    var PREFIX = 'MMI:', VERSION = '1.6';
+    var PREFIX = 'MMI:', MARK = 'MonsterMacroInstaller:', VERSION = '1.7';
     var esc = function (s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
     var whisper = function (who, text) { sendChat('Monster Macro Installer', '/w "' + String(who || 'gm').replace(/"/g,'') + '" ' + text, null, {noarchive:true}); };
     var attr = function (cid, name) {
@@ -36,15 +36,28 @@ var MonsterMacroInstaller = MonsterMacroInstaller || (function () {
     var core = '/w GM &{template:default} {{name=Core Stats}} {{Strength=[[@{strength}]] | [[@{strength_mod}]]}} {{Dexterity=[[@{dexterity}]] | [[@{dexterity_mod}]]}} {{Constitution=[[@{constitution}]] | [[@{constitution_mod}]]}} {{Intelligence=[[@{intelligence}]] | [[@{intelligence_mod}]]}} {{Wisdom=[[@{wisdom}]] | [[@{wisdom_mod}]]}} {{Charisma=[[@{charisma}]] | [[@{charisma_mod}]]}}';
     var secondary = '/w GM &{template:default} {{name= Secondary Stats}} {{Type=@{selected|npc_type} }} {{AC=@{selected|npc_ac} @{selected|npc_actype} }} {{Challenge=@{selected|npc_challenge} }} {{Senses=@{selected|npc_senses} }} {{Languages=@{selected|npc_languages} }} {{Vulnerabilities=@{selected|npc_vulnerabilities} }} {{Resistances=@{selected|npc_resistances} }} {{Immunities=@{selected|npc_immunities} }} {{Condition Immunity=@{selected|npc_condition_immunities} }}';
     var saves = '/w GM &{template:default} {{name=Saving Throws}} {{Str Save=[[1d20+@{npc_str_save}]] | [[1d20+@{npc_str_save}]]}} {{Dex Save=[[1d20+@{npc_dex_save}]] | [[1d20+@{npc_dex_save}]]}} {{Con Save=[[1d20+@{npc_con_save}]] | [[1d20+@{npc_con_save}]]}} {{Int Save=[[1d20+@{npc_int_save}]] | [[1d20+@{npc_int_save}]]}} {{Wis Save=[[1d20+@{npc_wis_save}]] | [[1d20+@{npc_wis_save}]]}} {{Cha Save=[[1d20+@{npc_cha_save}]] | [[1d20+@{npc_cha_save}]]}}';
-    var make = function (cid, key, label, action) {
-        var name = PREFIX + key;
-        var ability = findObjs({_type:'ability', _characterid:cid, name:name})[0];
-        // Names are stable and unique. The visible name is the ability name.
-        var visible = PREFIX + label;
-        if (ability) { ability.set({name:visible, action:action, istokenaction:true}); return; }
-        ability = findObjs({_type:'ability', _characterid:cid, name:visible})[0];
-        if (ability) { ability.set({action:action, istokenaction:true}); return; }
-        createObj('ability', {characterid:cid, name:visible, action:action, istokenaction:true});
+    // Track ownership in the hidden ability description, not the button name.
+    var managed = function(a) {
+        return String(a.get('description') || '').indexOf(MARK) === 0 ||
+            String(a.get('name') || '').indexOf(PREFIX) === 0;
+    };
+    var make = function(cid, key, label, action, expected) {
+        var abilities = findObjs({_type:'ability', _characterid:cid});
+        var marker = MARK + key;
+        var ability = abilities.filter(function(a) { return a.get('description') === marker; })[0];
+        if (!ability) ability = abilities.filter(function(a) {
+            return managed(a) && a.get('name').indexOf(PREFIX) === 0 && a.get('action') === action && !expected[a.id];
+        })[0];
+        label = label.replace(/[:|}()]/g, ' ').replace(/\s+/g, ' ').trim();
+        var name = label, n = 2;
+        while (abilities.some(function(a) { return (!ability || a.id !== ability.id) && a.get('name') === name; })) {
+            name = label + ' ' + n++;
+        }
+        var fields = {name:name, action:action, description:marker, istokenaction:true};
+        if (ability) ability.set(fields);
+        else { fields.characterid = cid; ability = createObj('ability', fields); }
+        if (!ability) throw new Error('Could not create ability: ' + name);
+        expected[ability.id] = true;
     };
     var hasDamage = function(r) {
         // Roll20 2014 NPC action rows typically expose attack_damage / attack_damage2.
@@ -74,9 +87,9 @@ var MonsterMacroInstaller = MonsterMacroInstaller || (function () {
         return choices.length ? '?{Select a Spell|' + choices.join('|') + '}' : '';
     };
     var install = function(cid) {
-        var expected = {}, add = function(name, action) {
-            expected[PREFIX + name] = true;
-            make(cid, name, name, action);
+        var expected = {}, add = function(name, action, key) {
+            var row = action.match(/repeating_(npc[^_]+)_(-[^_]+)_/);
+            make(cid, key || (row ? row[1] + ':' + row[2] : name), name, action, expected);
         };
         add('Initiative', '%{selected|npc_init}');
         add('Core Stats', core);
@@ -85,18 +98,18 @@ var MonsterMacroInstaller = MonsterMacroInstaller || (function () {
         var actions = getRows(cid,'npcaction'), traits = getRows(cid,'npctrait');
         actions.forEach(function(r,i) {
             var n = String(r.name || r.npc_action_name || 'Action '+(i+1)).trim();
-            var label = (i+1) + ' ' + n;
+            var label = n;
             add('ATK ' + label, '/w gm %{selected|repeating_npcaction_' + r.id + '_npc_action}' + (hasDamage(r) ? '\n/w gm %{selected|repeating_npcaction_' + r.id + '_npc_dmg}' : ''));
         });
         traits.forEach(function(r,i) {
             var n = String(r.name || 'Trait '+(i+1)).trim();
-            add('TRAIT ' + (i+1) + ' ' + n, '/w gm &{template:npcaction} {{name=@{selected|npc_name}}} {{rname=@{selected|repeating_npctrait_' + r.id + '_name}}} {{description=@{selected|repeating_npctrait_' + r.id + '_description}}}');
+            add('TRT ' + n, '/w gm &{template:npcaction} {{name=@{selected|npc_name}}} {{rname=@{selected|repeating_npctrait_' + r.id + '_name}}} {{description=@{selected|repeating_npctrait_' + r.id + '_description}}}');
         });
         // Reactions are descriptive repeating entries, like NPC traits.
         var reactions = getRows(cid, 'npcreaction');
         reactions.forEach(function(r, i) {
             var n = String(r.name || 'Reaction ' + (i + 1)).trim();
-            add('REACT ' + (i + 1) + ' ' + n,
+            add('REA ' + n,
                 '/w gm &{template:npcaction} {{name=@{selected|npc_name}}} ' +
                 '{{rname=@{selected|repeating_npcreaction_' + r.id + '_name}}} ' +
                 '{{description=@{selected|repeating_npcreaction_' + r.id + '_description}}}');
@@ -106,7 +119,7 @@ var MonsterMacroInstaller = MonsterMacroInstaller || (function () {
         legendary.forEach(function(r, i) {
             var n = String(r.name || 'Legendary Action ' + (i + 1)).trim();
             var base = 'repeating_npcaction-l_' + r.id;
-            add('LEG ' + (i + 1) + ' ' + n,
+            add('LEG ' + n,
                 '/w gm %{selected|' + base + '_npc_action}' +
                 (hasDamage(r) ? '\n/w gm %{selected|' + base + '_npc_dmg}' : ''));
         });
@@ -116,7 +129,7 @@ var MonsterMacroInstaller = MonsterMacroInstaller || (function () {
         bonus.forEach(function(r, i) {
             var n = String(r.name || r.npc_action_name || 'Bonus Action ' + (i + 1)).trim();
             var base = 'repeating_npcbonusaction_' + r.id;
-            add('BONUS ' + (i + 1) + ' ' + n,
+            add('BON ' + n,
                 '/w gm %{selected|' + base + '_npc_action}' +
                 (hasDamage(r) ? '\n/w gm %{selected|' + base + '_npc_dmg}' : ''));
         });
@@ -124,7 +137,7 @@ var MonsterMacroInstaller = MonsterMacroInstaller || (function () {
         mythic.forEach(function(r, i) {
             var n = String(r.name || r.npc_action_name || 'Mythic Action ' + (i + 1)).trim();
             var base = 'repeating_npcaction-m_' + r.id;
-            add('MYTH ' + (i + 1) + ' ' + n,
+            add('MYT ' + n,
                 '/w gm %{selected|' + base + '_npc_action}' +
                 (hasDamage(r) ? '\n/w gm %{selected|' + base + '_npc_dmg}' : ''));
         });
@@ -134,7 +147,7 @@ var MonsterMacroInstaller = MonsterMacroInstaller || (function () {
         // Only remove abilities belonging to this installer.
         findObjs({_type:'ability', _characterid:cid}).forEach(function(a) {
             var n = a.get('name');
-            if (n.indexOf(PREFIX) === 0 && !expected[n]) a.remove();
+            if (managed(a) && !expected[a.id]) a.remove();
         });
         return {actions:actions.length, traits:traits.length, reactions:reactions.length, legendary:legendary.length, bonus:bonus.length, mythic:mythic.length, spells:!!spells};
     };
@@ -187,7 +200,7 @@ var MonsterMacroInstaller = MonsterMacroInstaller || (function () {
         var who = (getObj('player',msg.playerid) || {get:function(){return 'gm';}}).get('_displayname');
         var args = msg.content.trim().split(/\s+/).slice(1), tokenOnly = args.indexOf('--token') !== -1;
         if (args.indexOf('--help') !== -1) {
-            whisper(who, '<b>Monster Macro Installer ' + VERSION + '</b><br>!setupnpc — selected token<br>!setupnpc --all — all selected tokens<br>!setupnpc --token — token bars only<br>Abilities created with MMI: prefix.');
+            whisper(who, '<b>Monster Macro Installer ' + VERSION + '</b><br>!setupnpc — selected token<br>!setupnpc --all — all selected tokens<br>!setupnpc --token — token bars only<br>!setupnpc --macros — refresh abilities without changing token bars.');
             return;
         }
         var selected = (msg.selected || []).filter(function(s){return s._type === 'graphic';});
@@ -205,7 +218,7 @@ var MonsterMacroInstaller = MonsterMacroInstaller || (function () {
                 report.push(esc(name) + ': ' + stats.actions + ' actions, ' + stats.traits + ' traits, ' + stats.reactions + ' reactions, ' + stats.legendary + ' legendary actions, ' + stats.bonus + ' bonus actions, ' + stats.mythic + ' mythic actions, spells: ' + (stats.spells ? 'yes' : 'no'));
                 processed[cid] = true;
             }
-            setupToken(token,cid,function(result){ whisper(who,esc(name) + ': ' + esc(result)); });
+            if (args.indexOf('--macros') === -1) setupToken(token,cid,function(result){ whisper(who,esc(name) + ': ' + esc(result)); });
         });
         if (report.length) whisper(who, report.join('<br>'));
     };
